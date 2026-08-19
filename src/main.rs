@@ -1,15 +1,16 @@
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::sync::{Arc, Mutex};
+use std::io;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use tui_input::backend::crossterm::EventHandler;
-use std::time::Duration;
 use Constraint::{Percentage, Fill, Length, Min};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, List, ListState, Paragraph, Row, Table, TableState};
 use ratatui::{self, Frame, Terminal};
-use std::io;
 use tui_input::{Input};
+use mndp_rs::{Device, Listener};
+use tokio::time::{self, Duration};
 
 struct App {
     state: AppState,
@@ -18,9 +19,10 @@ struct App {
     current_input: Arc<Mutex<Input>>,
     input_mode: bool,
     table_state: TableState,
-    table_items: Vec<Vec<&'static str>>,
     list_state: ListState,
-    list_items: Vec<&'static str>
+    list_items: Vec<&'static str>,
+    mndp_listener: Listener,
+    devices: Vec<Device>,
 }
 
 enum AppState {
@@ -47,35 +49,9 @@ impl App {
         state.select(Some(0));
         list_state.select(Some(0));
 
-        let items = vec![
-            vec![
-                "B8:69:F4:BE:3C:29",
-                "196.223.31.42",
-                "GNS_SAIX_TERACO_CCR01",
-                "6.47.10(long-term)",
-                "sfp5",
-                "1295h10m5s",
-                "CCR1016-12S-1S+",
-            ],
-            vec![
-                "B8:69:F4:BE:3C:29",
-                "196.223.31.42",
-                "GNS_SAIX_TERACO_CCR01",
-                "6.47.10(long-term)",
-                "sfp5",
-                "1295h10m5s",
-                "CCR1016-12S-1S+",
-            ],
-            vec![
-                "B8:69:F4:BE:3C:29",
-                "196.223.31.42",
-                "GNS_SAIX_TERACO_CCR01",
-                "6.47.10(long-term)",
-                "sfp5",
-                "1295h10m5s",
-                "CCR1016-12S-1S+",
-            ],
-        ];
+        let address_input = Arc::new(Mutex::new(Input::default()));
+        let username_input = Arc::new(Mutex::new(Input::default()));
+        let password_input = Arc::new(Mutex::new(Input::default()));
 
         let list_items = vec![
             "/caps-man",
@@ -88,9 +64,6 @@ impl App {
             "/tool"
         ];
 
-        let address_input = Arc::new(Mutex::new(Input::default()));
-        let username_input = Arc::new(Mutex::new(Input::default()));
-        let password_input = Arc::new(Mutex::new(Input::default()));
 
         App {
             state: AppState::Login,
@@ -101,7 +74,8 @@ impl App {
             list_input: [Arc::clone(&address_input), Arc::clone(&username_input), Arc::clone(&password_input)],
             index_input: 0,
             input_mode: false,
-            table_items: items,
+            mndp_listener: Listener::new(mndp_rs::MndpConfig { interface: None, timeout: Duration::from_secs(100)} ).expect("creating mndp Listener error "),
+            devices: Vec::new()
         }
     }
 
@@ -112,8 +86,7 @@ impl App {
     pub fn prev(&mut self) {
         self.table_state.select_previous();
     }
-
-    fn next_input(&mut self) {
+fn next_input(&mut self) {
         if self.index_input < 2 {
             self.index_input+= 1;
             self.current_input = Arc::clone(&self.list_input[self.index_input])
@@ -174,20 +147,6 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') => self.next(),
                     KeyCode::Up | KeyCode::Char('k') => self.prev(),
                     KeyCode::Char('t') => self.state = AppState::Main,
-                    KeyCode::Char('b') => self.state = AppState::Login,
-                    KeyCode::Char('a') => {
-                        self.table_items.push(
-                            vec![
-                            "B8:69:F4:BE:3C:29",
-                            "196.223.31.42",
-                            "GNS_SAIX_TERACO_CCR01",
-                            "6.47.10(long-term)",
-                            "sfp5",
-                            "1295h10m5s",
-                            "CCR1016-12S-1S+",
-                            ],
-                        );
-                    }
                     // handle other key events
                     _ => {}
                 },
@@ -199,21 +158,21 @@ impl App {
     }
 
     fn handle_main_event(&mut self) -> std::io::Result<bool> {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') => return Ok(true),
-                    KeyCode::Char('g') => self.list_state.select_first(),
-                    KeyCode::Char('G') => self.list_state.select_last(),
-                    KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
-                    KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
-                    KeyCode::Char('b') => self.state = AppState::Login,
-                    _ => {}
-                },
-                // handle other events
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Char('q') => return Ok(true),
+                KeyCode::Char('g') => self.list_state.select_first(),
+                KeyCode::Char('G') => self.list_state.select_last(),
+                KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+                KeyCode::Char('b') => self.state = AppState::Login,
                 _ => {}
-            }
-            Ok(false)
+            },
+            // handle other events
+            _ => {}
         }
+        Ok(false)
+    }
 
     pub fn handle_events(&mut self) -> std::io::Result<bool> {
         match self.state {
@@ -312,10 +271,19 @@ impl App {
             .height(1);
 
         let rows: Vec<Row> = self
-            .table_items
+            .devices
             .iter()
-            .map(|item| {
-                let cells: Vec<Cell> = item.iter().map(|c| Cell::from(*c)).collect();
+            .map(|device| {
+                let mut cells: Vec<Cell> = vec![];
+                cells.push(Cell::from(device.mac_address.to_string()));
+                cells.push(Cell::from(device.ipv4_address.to_string()));
+                cells.push(Cell::from(String::from(&device.identity)));
+                cells.push(Cell::from(String::from(&device.version)));
+                cells.push(Cell::from(String::from(&device.interface_name)));
+                cells.push(Cell::from("Skip duration"));
+                cells.push(Cell::from(String::from(&device.software_id)));
+                cells.push(Cell::from(String::from(&device.board)));
+
                 Row::new(cells).height(1)
             })
         .collect();
@@ -401,23 +369,38 @@ impl App {
     }
 }
 
-fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     let mut app = App::new();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let mut device_rx = app.mndp_listener.clone().start_discovery_stream();
+    let sleep = time::sleep(Duration::from_millis(100));
+    tokio::pin!(sleep);
 
     loop {
         terminal.draw(|f| app.render(f))?;
 
-        if app.handle_events()? {
-            break;
+        tokio::select! {
+            maybe_device = device_rx.recv() => {
+                if let Some(device) = maybe_device {
+                    app.devices.push(device);
+                } 
+            }
+            _ = &mut sleep => {
+                if app.handle_events()? {
+                    drop(device_rx);
+                    break;
+                }
+            }
         }
-    }
+    };
 
-    // Restore terminal
+
+    // restore terminal
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
