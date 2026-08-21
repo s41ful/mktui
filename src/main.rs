@@ -2,21 +2,31 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::sync::{Arc, Mutex};
 use tui_input::backend::crossterm::EventHandler;
 use std::time::Duration;
+use Constraint::{Percentage, Fill, Length, Min};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, List, ListState, Paragraph, Row, Table, TableState};
 use ratatui::{self, Frame, Terminal};
 use std::io;
 use tui_input::{Input};
 
 struct App {
+    state: AppState,
     list_input: [Arc<Mutex<Input>>; 3],
     index_input: usize,
     current_input: Arc<Mutex<Input>>,
     input_mode: bool,
     table_state: TableState,
     table_items: Vec<Vec<&'static str>>,
+    list_state: ListState,
+    list_items: Vec<&'static str>
+}
+
+enum AppState {
+    Login,
+    Main,
+    Detail,
 }
 
 const FOCUSED_BORDER_STYLE: Style = Style::new()
@@ -33,7 +43,9 @@ const HEADER_STYLE: Style = Style::new()
 impl App {
     fn new() -> App {
         let mut state = TableState::default();
+        let mut list_state = ListState::default();
         state.select(Some(0));
+        list_state.select(Some(0));
 
         let items = vec![
             vec![
@@ -65,12 +77,26 @@ impl App {
             ],
         ];
 
+        let list_items = vec![
+            "/caps-man",
+            "/console",
+            "/ip",
+            "/ipv6",
+            "/interface",
+            "/user",
+            "/system",
+            "/tool"
+        ];
+
         let address_input = Arc::new(Mutex::new(Input::default()));
         let username_input = Arc::new(Mutex::new(Input::default()));
         let password_input = Arc::new(Mutex::new(Input::default()));
 
         App {
+            state: AppState::Login,
             table_state: state,
+            list_state: list_state,
+            list_items: list_items,
             current_input: Arc::clone(&address_input),
             list_input: [Arc::clone(&address_input), Arc::clone(&username_input), Arc::clone(&password_input)],
             index_input: 0,
@@ -133,7 +159,7 @@ impl App {
         }
     }
 
-    pub fn handle_events(&mut self) -> std::io::Result<bool> {
+    fn handle_login_event(&mut self) -> std::io::Result<bool> {
         if self.input_mode {
             if event::poll(Duration::from_millis(50))? {
                 self.handle_input_mode();
@@ -147,6 +173,8 @@ impl App {
                     KeyCode::Char('i') => self.input_mode = true,
                     KeyCode::Down | KeyCode::Char('j') => self.next(),
                     KeyCode::Up | KeyCode::Char('k') => self.prev(),
+                    KeyCode::Char('t') => self.state = AppState::Main,
+                    KeyCode::Char('b') => self.state = AppState::Login,
                     KeyCode::Char('a') => {
                         self.table_items.push(
                             vec![
@@ -170,10 +198,63 @@ impl App {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame) {
-        let area = f.area();
-        use Constraint::{Percentage, Fill, Length, Min};
+    fn handle_main_event(&mut self) -> std::io::Result<bool> {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') => return Ok(true),
+                    KeyCode::Char('g') => self.list_state.select_first(),
+                    KeyCode::Char('G') => self.list_state.select_last(),
+                    KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+                    KeyCode::Char('b') => self.state = AppState::Login,
+                    _ => {}
+                },
+                // handle other events
+                _ => {}
+            }
+            Ok(false)
+        }
 
+    pub fn handle_events(&mut self) -> std::io::Result<bool> {
+        match self.state {
+            AppState::Login => {
+                self.handle_login_event()
+            },
+            AppState::Main => {
+                self.handle_main_event()
+            },
+            AppState::Detail => {
+                todo!()
+            }
+        }
+    }
+
+    fn render_main(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let vertical = Layout::vertical([Length(1), Min(0), Length(1)]);
+        let [title_area, main_area, status_area] = vertical.areas(area);
+        let horizontal = Layout::horizontal([Fill(1), Fill(2)]);
+        let [list_area, config_area] = horizontal.areas(main_area);
+
+        let list_widget = List::new(self.list_items.clone())
+            .highlight_style(SELECTED_TABLE_STYLE)
+            .style(FOCUSED_BORDER_STYLE)
+            .block(
+                Block::default()
+                .borders(Borders::ALL)
+                .title("List configuration"))
+            .highlight_symbol(" > ");
+
+        f.render_widget(Block::bordered().title("Connected to: Mikrotik, Via: telnet:192.168.1.2"), title_area);
+        f.render_widget(Block::bordered().title("Status Bar"), status_area);
+        f.render_widget(Block::bordered(), config_area);
+
+        // Render list_state
+        f.render_stateful_widget(list_widget, list_area, &mut self.list_state);
+    }
+
+    fn render_login(&mut self, f: &mut Frame) {
+        let area = f.area();
         let vertical = Layout::vertical([Length(1), Min(0), Length(1)]);
         let [title_area, main_area, status_area] = vertical.areas(area);
         let vertical2 = Layout::vertical([Fill(1), Fill(2)]);
@@ -309,6 +390,14 @@ impl App {
 
         // Render the bottom table
         f.render_stateful_widget(table, bottom_area, &mut self.table_state);
+    }
+
+    pub fn render(&mut self, f: &mut Frame) {
+        match self.state {
+            AppState::Login => self.render_login(f),
+            AppState::Main => self.render_main(f),
+            AppState::Detail => todo!(),
+        }
     }
 }
 
