@@ -1,59 +1,25 @@
 use Constraint::{Fill, Length, Min, Percentage};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use mndp_rs::{Device, Listener};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Position};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell, List, ListState, Paragraph, Row, Table, TableState};
-use ratatui::{self, Frame, Terminal};
-use std::io;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use mndp_rs::{Device, Listener, MndpError};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Margin, Rect, Position},
+    text::{Line, Span},
+    backend::CrosstermBackend,
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, Cell, Row, TableState, Table,
+        ScrollbarOrientation, ScrollbarState,
+    },
+    Frame, Terminal,
+};
+
+use std::io::{self};
 use std::sync::{Arc, Mutex};
 use tokio::time::{self, Duration};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-#[derive(Debug, Clone)]
-pub struct Theme {
-    pub name: String,
-    pub border: Style,
-    pub border_focus: Style,
-    pub title: Style,
-    pub header_cell: Style,
-    pub selected_row: Style,
-    pub normal_text: Style,
-    pub muted_text: Style,
-    pub accent: Style,
-    pub success: Style,
-    pub warning: Style,
-    pub danger: Style,
-}
-
-impl Theme {
-    pub fn new() -> Self {
-        Self {
-            name: "WinBox Dark".to_string(),
-            border: Style::default().fg(Color::Rgb(70, 82, 100)),
-            border_focus: Style::default().fg(Color::Rgb(90, 165, 230)),
-            title: Style::default()
-                .fg(Color::Rgb(105, 190, 245))
-                .add_modifier(Modifier::BOLD),
-                header_cell: Style::default()
-                    .fg(Color::Rgb(220, 228, 235))
-                    .bg(Color::Rgb(32, 42, 58))
-                    .add_modifier(Modifier::BOLD),
-                    selected_row: Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Rgb(45, 90, 150))
-                        .add_modifier(Modifier::BOLD),
-                        normal_text: Style::default().fg(Color::Rgb(210, 218, 225)),
-                        muted_text: Style::default().fg(Color::Rgb(125, 138, 155)),
-                        accent: Style::default().fg(Color::Rgb(90, 180, 235)),
-                        success: Style::default().fg(Color::Rgb(70, 190, 120)),
-                        warning: Style::default().fg(Color::Rgb(235, 180, 70)),
-                        danger: Style::default().fg(Color::Rgb(230, 80, 80)),
-        }
-    }
-}
+use crate::ui::theme::{Theme, ThemePicker};
+pub mod ui;
 
 struct App {
     state: AppState,
@@ -66,7 +32,9 @@ struct App {
     list_items: Vec<&'static str>,
     mndp_listener: Listener,
     devices: Vec<Device>,
+    theme_picker: Option<ThemePicker>,
     theme: Theme,
+    status_bar: String,
 }
 
 enum AppState {
@@ -74,7 +42,6 @@ enum AppState {
     Main,
     Detail,
 }
-
 
 impl App {
     fn new() -> App {
@@ -117,7 +84,9 @@ impl App {
             })
             .expect("creating mndp Listener error "),
             devices: Vec::new(),
-            theme: Theme::new(),
+            theme: Theme::winbox_dark(),
+            theme_picker: None,
+            status_bar: String::from("Listening from 0.0.0.0:5678"),
         }
     }
 
@@ -171,7 +140,7 @@ impl App {
         }
     }
 
-    fn handle_login_event(&mut self) -> std::io::Result<bool> {
+    fn handle_login_event_code(&mut self, code: KeyCode) -> std::io::Result<bool> {
         if self.input_mode {
             if event::poll(Duration::from_millis(50))? {
                 self.handle_input_mode();
@@ -179,47 +148,90 @@ impl App {
 
             Ok(false)
         } else {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            match code {
                     KeyCode::Char('q') => return Ok(true),
                     KeyCode::Char('i') => self.input_mode = true,
                     KeyCode::Down | KeyCode::Char('j') => self.next(),
                     KeyCode::Up | KeyCode::Char('k') => self.prev(),
-                    KeyCode::Char('t') => self.state = AppState::Main,
+                    KeyCode::Char('m') => self.state = AppState::Main,
                     // handle other key events
                     _ => {}
-                },
-                // handle other events
-                _ => {}
-            }
+                }
             Ok(false)
         }
     }
 
-    fn handle_main_event(&mut self) -> std::io::Result<bool> {
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') => return Ok(true),
-                KeyCode::Char('g') => self.list_state.select_first(),
-                KeyCode::Char('G') => self.list_state.select_last(),
-                KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
-                KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
-                KeyCode::Char('b') => self.state = AppState::Login,
-                _ => {}
-            },
-            // handle other events
+    fn handle_main_event_code(&mut self, code: KeyCode) -> std::io::Result<bool> {
+        match code {
+            KeyCode::Char('g') => self.list_state.select_first(),
+            KeyCode::Char('G') => self.list_state.select_last(),
+            KeyCode::Down | KeyCode::Char('j') => self.list_state.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.list_state.select_previous(),
+            KeyCode::Char('b') => self.state = AppState::Login,
             _ => {}
         }
+
         Ok(false)
     }
 
     pub fn handle_events(&mut self) -> std::io::Result<bool> {
-        match self.state {
-            AppState::Login => self.handle_login_event(),
-            AppState::Main => self.handle_main_event(),
-            AppState::Detail => {
-                todo!()
+        if self.input_mode {
+            self.handle_input_mode();
+            return Ok(false)
+        }
+
+        if let Event::Key(key) = event::read()? {
+            // Windows reports both press and release for every keystroke; without
+            // this each key would act twice.
+            if key.kind != KeyEventKind::Press {
+                return Ok(false);
+            } 
+
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('t'), _) => { self.open_theme_picker() }
+                (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    self.mndp_listener.stop_ctrl.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(true)
+                }
+                _ => {
+                    if self.theme_picker.is_some() {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) => self.cancel_theme(),
+                            (KeyCode::Enter, _) => self.confirm_theme(),
+                            (KeyCode::Char('p'), KeyModifiers::CONTROL) | 
+                                (KeyCode::Up, _) => self.theme_picker_move(-1),
+                            (KeyCode::Char('n'), KeyModifiers::CONTROL) | 
+                                (KeyCode::Down, _) => self.theme_picker_move(1),
+                            (KeyCode::PageUp, _) => self.theme_picker_move(-10),
+                            (KeyCode::PageDown, _) => self.theme_picker_move(10),
+                            (KeyCode::Home, _) => self.theme_picker_move(isize::MIN / 2),
+                            (KeyCode::End, _) => self.theme_picker_move(isize::MAX / 2),
+                            (KeyCode::Backspace, _) => {
+                                self.theme_picker_edit_query(|q| {
+                                    q.pop();
+                                });
+                            }
+                            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+                                self.theme_picker_edit_query(|q| q.push(c));
+                            }
+                            _ => {}
+                        }
+
+                        return Ok(false)
+                    }
+
+                    match self.state {
+                        AppState::Main => return self.handle_main_event_code(key.code),
+                        AppState::Login => return self.handle_login_event_code(key.code),
+                        AppState::Detail => return Ok(false),
+                    }
+                }
             }
+
+            Ok(false)
+
+        } else {
+            return Ok(false)
         }
     }
 
@@ -244,8 +256,8 @@ impl App {
             Paragraph::new("mktui v0.1.0 - 192.168.1.2 (Mikrotik)").style(self.theme.title),
             title_area,
         );
-        f.render_widget(Block::bordered().title("Status Bar"), status_area);
-        f.render_widget(Block::bordered(), config_area);
+        f.render_widget(Paragraph::new(String::from(&self.status_bar)), status_area);
+        f.render_widget(Block::bordered().style(self.theme.border), config_area);
 
         // Render list_state
         f.render_stateful_widget(list_widget, list_area, &mut self.list_state);
@@ -317,17 +329,32 @@ impl App {
             .style(self.theme.header_cell)
             .height(1);
 
+
         let rows: Vec<Row> = self
             .devices
             .iter()
             .map(|device| {
                 let mut cells: Vec<Cell> = vec![];
+
+                let uptime = device.uptime.as_secs();
+                let uptime_readable: String;
+
+                if uptime < 86400 {
+                    if uptime % 86400 / 3600 == 0 {
+                        uptime_readable = format!("{}m", uptime % 86400 % 3600)
+                    } else {
+                        uptime_readable = format!("{}h{}m", uptime % 86400 / 3600, uptime % 86400 % 3600 / 60)
+                    }
+                } else {
+                    uptime_readable = format!("{}d{}h{}m", uptime / 86400, uptime % 86400 / 3600, uptime % 86400 % 3600 / 60)
+                }
+
                 cells.push(Cell::from(device.mac_address.to_string()));
                 cells.push(Cell::from(device.ipv4_address.to_string()));
                 cells.push(Cell::from(String::from(&device.identity)));
                 cells.push(Cell::from(String::from(&device.version)));
                 cells.push(Cell::from(String::from(&device.interface_name)));
-                cells.push(Cell::from("Skip duration"));
+                cells.push(Cell::from(uptime_readable));
                 cells.push(Cell::from(String::from(&device.software_id)));
                 cells.push(Cell::from(String::from(&device.board)));
 
@@ -357,7 +384,7 @@ impl App {
             .highlight_symbol(">> ");
 
         f.render_widget(Paragraph::new("mktui v0.1.0").style(self.theme.title), title_area);
-        f.render_widget(Paragraph::new("Status Bar").style(self.theme.muted_text), status_area);
+        f.render_widget(Paragraph::new(String::from(&self.status_bar)).style(self.theme.muted_text), status_area);
         f.render_widget(
             Block::bordered()
             .title("Connect to")
@@ -414,7 +441,222 @@ impl App {
             AppState::Main => self.render_main(f),
             AppState::Detail => todo!(),
         }
+        if self.theme_picker.is_some() {
+            Self::render_theme_modal(f, self);
+        }
     }
+
+    /// Open the theme picker.
+    ///
+    /// This replaced cycling. With one built-in theme and 238 bundled base16 schemes,
+    /// stepping through them one keypress at a time is not a way to find anything.
+    pub fn open_theme_picker(&mut self) {
+        let entries = crate::ui::theme::catalogue();
+        let selected = entries
+            .iter()
+            .position(|e| e.id == self.theme.id)
+            .unwrap_or(0);
+
+        self.theme_picker = Some(ThemePicker {
+            entries,
+            query: String::new(),
+            selected,
+            offset: std::cell::Cell::new(0),
+            original: self.theme.id.clone(),
+        });
+    }
+        /// Apply whatever the picker is currently highlighting.
+    ///
+    /// Called on every movement so the choice is previewed against real data rather than
+    /// a swatch — the point of a theme is how the tables look under it.
+    pub fn preview_highlighted_theme(&mut self) {
+        if let Some(id) = self.theme_picker.as_ref().and_then(|p| p.current()) {
+            if id != self.theme.id {
+                self.theme = crate::ui::theme::load(&id);
+            }
+        }
+    }
+
+    pub fn theme_picker_move(&mut self, delta: isize) {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return;
+        };
+        let len = picker.matches().len();
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+        picker.selected = match delta {
+            d if d < 0 => picker.selected.saturating_sub(d.unsigned_abs()),
+            d => (picker.selected + d as usize).min(last),
+        };
+        self.preview_highlighted_theme();
+    }
+
+    pub fn theme_picker_edit_query(&mut self, edit: impl FnOnce(&mut String)) {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return;
+        };
+        edit(&mut picker.query);
+        // The list just changed under the cursor.
+        picker.selected = 0;
+        picker.offset.set(0);
+        self.preview_highlighted_theme();
+    }
+
+    /// Keep the highlighted theme and close.
+    pub fn confirm_theme(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            let chosen = self.theme.id.clone();
+            self.status_bar = format!("Theme: {}", self.theme.name);
+            let _ = picker;
+            // // Remember it, so the choice survives a restart.
+            // if let Err(e) = crate::config::save_theme(&chosen) {
+            //     self.status_bar = format!("Theme: {} (not saved: {e})", self.theme.name);
+            // }
+        }
+    }
+
+    /// Close without keeping the preview.
+    pub fn cancel_theme(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            self.theme = crate::ui::theme::load(&picker.original);
+        }
+    }
+
+    /// The theme picker.
+    ///
+    /// A list rather than the cycle this replaced: 239 themes is not something to step
+    /// through one keypress at a time. Typing filters, and every movement applies the
+    /// highlighted theme to the screen behind the modal, so the choice is judged against real
+    /// tables instead of a swatch.
+    pub fn render_theme_modal(f: &mut Frame, app: &App) {
+        let Some(picker) = app.theme_picker.as_ref() else {
+            return;
+        };
+        let t = &app.theme;
+
+        let area = Self::centered_rect(60, 70, f.area());
+        f.render_widget(Clear, area);
+
+        let matches = picker.matches();
+        let selected = picker.selected.min(matches.len().saturating_sub(1));
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(t.border_focus)
+            .title(Span::styled(
+                    format!(" 🎨 Theme ({} of {}) ", matches.len(), picker.entries.len()),
+                    t.title,
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // search
+                Constraint::Min(3),    // list
+                Constraint::Length(1), // footer
+            ])
+            .split(inner);
+
+        let search = if picker.query.is_empty() {
+            Span::styled(" Type to search…", t.muted_text)
+        } else {
+            Span::styled(format!(" {}█", picker.query), t.warning)
+        };
+        f.render_widget(Paragraph::new(Line::from(search)), chunks[0]);
+
+        let rows = chunks[1].height as usize;
+        let offset = Self::visible_offset(picker.offset.get(), selected, rows, matches.len());
+        picker.offset.set(offset);
+
+        let items: Vec<ListItem> = matches
+            .iter()
+            .map(|entry| {
+                let current = entry.id == t.id;
+                let marker = if current { "● " } else { "  " };
+                ListItem::new(Line::from(vec![
+                        Span::styled(marker, t.success),
+                        Span::styled(format!("{:<28}", entry.name), t.normal_text),
+                        Span::styled(format!("{:<10}", entry.source.label()), t.muted_text),
+                        Span::styled(entry.author.clone(), t.muted_text),
+                ]))
+            })
+        .collect();
+
+        let mut state = ListState::default()
+            .with_offset(offset)
+            .with_selected(Some(selected));
+
+        f.render_stateful_widget(
+            List::new(items).highlight_style(t.selected_row),
+            chunks[1],
+            &mut state,
+        );
+
+        if matches.len() > rows {
+            let mut scrollbar_state = ScrollbarState::new(matches.len())
+                .position(offset)
+                .viewport_content_length(rows);
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(t.border),
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                        " ↑↓ move · Enter keep · Esc cancel · Backspace edit ",
+                        t.muted_text,
+            ))),
+            chunks[2],
+        );
+    }
+
+    /// Smallest scroll that brings `selected` into view. Mirrors the tables' rule.
+    fn visible_offset(current: usize, selected: usize, viewport: usize, total: usize) -> usize {
+        if viewport == 0 {
+            return 0;
+        }
+        let max_offset = total.saturating_sub(viewport);
+        let mut offset = current.min(max_offset);
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset + viewport {
+            offset = selected + 1 - viewport;
+        }
+        offset.min(max_offset)
+    }
+
+    fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ])
+            .split(r);
+
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ])
+            .split(vertical[1])[1]
+    }
+
 }
 
 #[tokio::main]
@@ -436,8 +678,20 @@ async fn main() -> std::io::Result<()> {
             maybe_device = device_rx.recv() => {
                 if let Some(result) = maybe_device {
                     match result {
-                        Ok(device) => app.devices.push(device),
-                        Err(_) => todo!(),
+                        Ok(device) => {
+                            if !app.devices.contains(&device) {
+                                app.devices.push(device);
+                            }
+                        },
+                        Err(err) => {
+                            match err {
+                                MndpError::TimedOut => {
+                                    app.status_bar = String::from("listener timed out press 'r' ro refresh");
+                                    continue
+                                }
+                                _ => eprintln!("mndp listener error: {:?}", err),
+                            }
+                        }
                     }
                 }
             }

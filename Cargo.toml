@@ -8,4 +8,6 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 tui-input = "0.15"
 tokio = { version = "1.53.1", features = ["full"] }
-mndp-rs = "0.4.0"
+mndp-rs = "0.5.0"
+dirs = "5.0"
+anyhow = "1.0"
